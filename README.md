@@ -40,6 +40,8 @@ The output file should be an Excel worksheet containing the following columns:
 - Total Unearned Premium
 - Total Taxes
 
+Please include a copy of the output file in your repo when you submit to us.
+
 ### Instructions for Calculations
 
 #### Pro-rata GWP
