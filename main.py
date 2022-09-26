@@ -1,4 +1,5 @@
 from array import array
+from itertools import count
 import string
 import pandas as pd
 import numpy as np
@@ -34,7 +35,6 @@ def get_annual_days (start_date: dt.date) -> int:
 
             — `get_annual_days('1582-01-01')` -> 365 and _not_ 355
 
-        
     '''
     end_date = start_date+relativedelta(years=1)
     return (end_date-start_date).days
@@ -51,26 +51,50 @@ def get_daily_gwp (srs: pd.Series) -> pd.Series:
         Gross Written Premium (GWP) and effective date of a policy, 
         returns the daily GWP of that policy.
     '''
-    return srs['Annual GWP']/get_annual_days(srs['Effective Date'])
+    start_date = srs['Effective Date'] 
+    agwp = srs['Annual GWP']
+    if (agwp is None):
+        return 0        # can't determine daily GWP without annual GWP
 
-def get_earned_unearned_premium (srs: pd.Series) -> pd.Series:
-    rd = dt.datetime.today().date()
+    if (start_date is None):    # there is no (parsable) Effective Date
+        return agwp/365.2425    # so use average number of days in the year.
+
+    # Use the actual number of days in the policy year
+    return agwp/get_annual_days(start_date)
+
+def get_earned_unearned_premium (srs: pd.Series, report_date: dt.date) -> float:
+    ''' Given:
+
+        — a pandas `Series` containing an effective date, expiration
+        date, and daily gross written premium 
+        
+        — the date of the report
+
+        returns a list of two elements: the earned premium and unearned 
+        premium of that policy current to the report date.
+
+        If there is no effective date, earned premium will be zero.
+        If there is no expiration date, unearned premium will be zero.
+    '''
+
+def get_earned_premium (srs: pd.Series, report_date: dt.date) -> float:
     sd = srs['Effective Date']
-    ed = srs['Expiration Date']
-    if (rd <= sd):
-        effective_so_far = 0
-        ineffective_remaining = srs['Effective Days']
-    elif (rd <= ed):
-        effective_so_far =  (rd-sd).days
-        ineffective_remaining = (ed-rd).days
-    else: 
-        effective_so_far = srs['Effective Days']
-        ineffective_remaining = 0   # if only 
+    if (sd and sd < report_date):
+        return (report_date - sd).days
+    else:
+        return 0
 
-    return [effective_so_far*srs['Daily GWP'], 
-            ineffective_remaining*srs['Daily GWP']]
+def get_unearned_premium (srs: pd.Series, report_date: dt.date) -> float:
+    ed = srs['Expiration Date']
+    if (ed and ed > report_date):
+        return (ed-report_date).days
+    else:
+        return 0
 
 def get_taxes (srs: pd.Series) -> pd.Series:
+    ''' Given a pandas `Series`, returns the taxes on pro-rata GWP for
+        the state in which the policy was written.
+    '''
     return get_tax_rate(srs['State'])*srs['Pro-Rata GWP']
 
 def dt_cleanup (d):
@@ -94,40 +118,94 @@ def int_cleanup (i):
     return i
 
 def sanitize_row (srs: pd.Series) -> array: 
-    vinre = '^[0-9a-zA-Z]{17}$'
-    vin = srs['VIN']
-    vin = vin if (vin and len(vin)==17 and re.search(vinre, vin)!=None) else np.NaN
+    vinre = '^[0-9A-HJ-NPR-Z]{17}$' # VINs cannot contain 'O', 'Q', or 'I'
+    vin = srs['VIN'].upper()
+    vin = vin if (vin and re.search(vinre, vin)!=None) else None
     effective = dt_cleanup(srs['Effective Date'])
     expiration = dt_cleanup(srs['Expiration Date'])
     if (effective > expiration): 
-        effective = np.NaN
+        effective = None
+        expiration = None
     gwp = int_cleanup(srs['Annual GWP'])
     return [vin, effective, expiration, gwp] 
 
 def sanitize_df (df: pd.DataFrame):
     ndf = df.copy()
-    ndf[['VIN', 'Effective Date', 
-         'Expiration Date', 
-         'Annual GWP']] = ndf.apply(sanitize_row, axis=1, result_type='expand')
-    return ndf.dropna(subset=['VIN', 'Effective Date', 'Expiration Date', 'Annual GWP'])
+    ndf[['VIN', 
+        'Effective Date', 
+        'Expiration Date', 
+        'Annual GWP']] = ndf.apply(sanitize_row, axis=1, result_type='expand')
+    return ndf
+
+def get_effective_days (srs: pd.Series):
+    start_date = srs['Effective Date']
+    end_date = srs['Expiration Date']
+    if (start_date and end_date):
+        return (end_date - start_date).days
+    return 0
 
 def main():
     s_report_date = '2022-08-01'
     # my processing follows
+
+    # storing s_report_date as a Datetime `date` for later
     report_date = dt.datetime.strptime(s_report_date, '%Y-%m-%d').date()
+
+    # There is some dirt in this data. 
     df = sanitize_df(read_file())
-    df['Effective Days'] = df.apply(lambda srs: (srs['Expiration Date']-
-                                                 srs['Effective Date']).days, 
-                                    axis=1)
+
+    # Effective days and Daily GWP are used repeatedly, so we are writing
+    # values directly into the pandas series for efficiency.
+    df['Effective Days'] = df.apply(get_effective_days, axis=1)
     df['Daily GWP'] = df.apply(get_daily_gwp, axis=1)
+
+    # four required new columns for aggregation (see README).  These
+    # rely on Effective Days and Daily GWP.
     df['Pro-Rata GWP'] = df.apply(get_pro_rata_gwp, axis=1)
-    df[['Earned Premium', 
-        'Unearned Premium']] = df.apply(get_earned_unearned_premium, 
-                                        axis=1,
-                                        result_type='expand')
-    df['Taxes'] = df.apply(get_taxes, axis=1)
+    df['Earned Premium'] = df.apply(
+        lambda x: get_earned_premium(x, report_date),
+        axis=1)
+    df['Unearned Premium'] = df.apply(
+        lambda x: get_unearned_premium(x, report_date),
+        axis=1)
+    # Relies on pro-rata GWP
+    df['Taxes'] = df.apply(get_taxes, axis=1) 
+
+    # Aggregation 
+    ag_functions = {
+        'VIN': 'count',
+        'Annual GWP': 'sum',
+        'Pro-Rata GWP': 'sum',
+        'Earned Premium': 'sum',
+        'Unearned Premium': 'sum',
+        'Taxes': 'sum'
+    }
+
+    aggregated_df = (
+         df.groupby('Company Name')
+        .aggregate(ag_functions)
+        .rename(columns = {
+            'VIN': 'Total Count of Vehicles (VINs)',
+            'Annual GWP': 'Total Annual GWP',
+            'Pro-Rata GWP': 'Total Pro-Rata GWP',
+            'Earned Premium': 'Total Earned Premium',
+            'Unearned Premium': 'Total Unearned Premium',
+            'Taxes': 'Total Taxes'
+        })
+    )
+
+    currencies = [
+        'Total Annual GWP', 
+        'Total Pro-Rata GWP', 
+        'Total Earned Premium',
+        'Total Unearned Premium',
+        'Total Taxes'
+    ]
+
+    aggregated_df[currencies] = aggregated_df[currencies].round(2)
+
     # my processing precedes
-    write_new_file(df, s_report_date)
+    write_new_file(aggregated_df, s_report_date)
     return
 
 if (__name__=='__main__'):
