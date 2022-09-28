@@ -66,6 +66,8 @@ Please include a copy of the output file in your repo when you submit to us.
 
 ### Project Structure and Setup
 
+The project is structured as a single, monolithic file.  
+
 You may structure your project as you wish.
 
 To test your application, we will create a new `pyenv` environment, install requirements.txt, and run it from the command line, i.e.: `python main.py`
