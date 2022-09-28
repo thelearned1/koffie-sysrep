@@ -1,8 +1,5 @@
-from array import array
-from itertools import count
 import string
 import pandas as pd
-import numpy as np
 import datetime as dt
 from dateutil.relativedelta import relativedelta
 import re
@@ -62,34 +59,70 @@ def get_daily_gwp (srs: pd.Series) -> pd.Series:
     # Use the actual number of days in the policy year
     return agwp/get_annual_days(start_date)
 
-def get_earned_unearned_premium (srs: pd.Series, report_date: dt.date) -> float:
+def __get_premium(
+    srs: pd.Series, 
+    report_date: dt.date, 
+    key: string, 
+    cmpfunc) -> float:
     ''' Given:
 
-        — a pandas `Series` containing an effective date, expiration
-        date, and daily gross written premium 
-        
-        — the date of the report
+        -   an appropriately sanitized Pandas `Series` with a date keyed
+            by `key`, a daily Gross Written Premium, and the number of
+            effective days in the policy;
 
-        returns a list of two elements: the earned premium and unearned 
-        premium of that policy current to the report date.
+        -   a report date;
 
-        If there is no effective date, earned premium will be zero.
-        If there is no expiration date, unearned premium will be zero.
+        -   and a comparison function between dates that returns true 
+            iff the first argument is earlier than the second;
+
+        returns the premium owed between the date keyed by `key` and the
+        report_date.  
+
+        If any of the conditions above are not met, returns 0.
     '''
+    v = srs[key]
+    ed = srs['Effective Days']
+    if (v and ed and cmpfunc(v, report_date)):
+        # logic here:
+        #   - if report date comes after v, cmpfunc will be <. So 
+        #     
+        return min(abs((report_date-v).days), ed) * srs['Daily GWP']
+    else:
+        return 0
 
 def get_earned_premium (srs: pd.Series, report_date: dt.date) -> float:
-    sd = srs['Effective Date']
-    if (sd and sd < report_date):
-        return (report_date - sd).days
-    else:
-        return 0
+    ''' Given:
+    
+        -   an appropriately sanitized Pandas `Series` with an effective  
+            date and daily Gross Written Premium
+        -   a report date
+
+        returns the earned premium current to the report date.  Note 
+        that it is assumed that the day's premium is not earned until
+        AFTER the report date.
+    '''
+    return __get_premium(
+        srs, 
+        report_date, 
+        'Effective Date', 
+        lambda x, y: x < y)
 
 def get_unearned_premium (srs: pd.Series, report_date: dt.date) -> float:
-    ed = srs['Expiration Date']
-    if (ed and ed > report_date):
-        return (ed-report_date).days
-    else:
-        return 0
+    ''' Given:
+    
+        -   an appropriately sanitized Pandas `Series` with an expiration 
+            date and daily Gross Written Premium
+        -   a report date
+
+        returns the unearned premium current to the report date.  Note 
+        that it is assumed that the day's premium is not earned until
+        AFTER the report date.
+    '''
+    return __get_premium(
+        srs, 
+        report_date, 
+        'Expiration Date', 
+        lambda x, y: x > y)
 
 def get_taxes (srs: pd.Series) -> pd.Series:
     ''' Given a pandas `Series`, returns the taxes on pro-rata GWP for
@@ -97,39 +130,74 @@ def get_taxes (srs: pd.Series) -> pd.Series:
     '''
     return get_tax_rate(srs['State'])*srs['Pro-Rata GWP']
 
-def dt_cleanup (d):
+__string_to_number_cleanup = str.maketrans("OI!ZSBG", "0112589")
+
+def dt_cleanup (d) -> dt.date:
+    ''' Given:
+        
+        - a date, returns the date
+
+        - a datetime, returns the date of that datetime
+
+        - a string, attempts to translate the string into a date.
+
+        Translation consists of replacing alphabetic characters and 
+        punctuation marks with numerals that have commonly been 
+        confused for those characters. Should this method fail, returns 
+        None.
+    '''
     if (isinstance(d, dt.datetime)):
         return d.date()
     elif (isinstance(d, dt.date)):
         return d
     else:
         try:
-            nd = dt.datetime.strptime(d.replace('O', '0'), '%Y-%m-%d').date()
+            nd = dt.datetime.strptime(
+                d.translate(__string_to_number_cleanup),
+                '%Y-%m-%d'
+            ).date()
             return nd
         except:
-            return np.NaN
+            return None
 
 def int_cleanup (i):
+    ''' Given a value i:
+       
+        - if i is numeric, returns i
+
+        - if i is a string, attempts to translate i into a numeric type.
+
+        Translation consists of replacing alphabetic characters and 
+        punctuation marks with numerals that have commonly been 
+        confused for those characters. Should this method fail, returns 
+        None.
+    '''
     if (not isinstance(i, (int, float))):
         try:
-            i = int(i.replace('O', '0'))
+            i = int(i.translate(__string_to_number_cleanup))
         except:
-            return np.NaN
+            return None
     return i
 
-def sanitize_row (srs: pd.Series) -> array: 
+def sanitize_row (srs: pd.Series): 
+    ''' Given a row, sanitizes it, that is, replaces invalid values with
+        likely valid values.
+    '''
     vinre = '^[0-9A-HJ-NPR-Z]{17}$' # VINs cannot contain 'O', 'Q', or 'I'
     vin = srs['VIN'].upper()
     vin = vin if (vin and re.search(vinre, vin)!=None) else None
     effective = dt_cleanup(srs['Effective Date'])
     expiration = dt_cleanup(srs['Expiration Date'])
-    if (effective > expiration): 
+    if (effective and expiration and effective > expiration): 
         effective = None
         expiration = None
     gwp = int_cleanup(srs['Annual GWP'])
     return [vin, effective, expiration, gwp] 
 
 def sanitize_df (df: pd.DataFrame):
+    ''' Given a DataFrame, sanitizes it, that is, replaces invalid values
+        with likely valid values.
+    '''
     ndf = df.copy()
     ndf[['VIN', 
         'Effective Date', 
@@ -138,6 +206,9 @@ def sanitize_df (df: pd.DataFrame):
     return ndf
 
 def get_effective_days (srs: pd.Series):
+    ''' Given a series, calculates the 
+        
+    '''
     start_date = srs['Effective Date']
     end_date = srs['Expiration Date']
     if (start_date and end_date):
@@ -156,7 +227,9 @@ def main():
 
     # Effective days and Daily GWP are used repeatedly, so we are writing
     # values directly into the pandas series for efficiency.
-    df['Effective Days'] = df.apply(get_effective_days, axis=1)
+    efd = df['Effective Date']
+    exd = df['Expiration Date']
+    df['Effective Days'] = (exd-efd).map(lambda x: x.days if ~pd.notnull(x) else 0)
     df['Daily GWP'] = df.apply(get_daily_gwp, axis=1)
 
     # four required new columns for aggregation (see README).  These
@@ -203,6 +276,7 @@ def main():
     ]
 
     aggregated_df[currencies] = aggregated_df[currencies].round(2)
+    aggregated_df.insert(1, 'Report Date', report_date)
 
     # my processing precedes
     write_new_file(aggregated_df, s_report_date)
